@@ -1,7 +1,5 @@
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -11,6 +9,42 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.PriorityQueue;
 import java.util.Stack;
+
+class VariableWidthEncoding {
+    private static final int BITS_PER_BYTE = 7;
+    private static final int READ_BITS_MASK = (1 << BITS_PER_BYTE) - 1; // 0b01111111
+    private static final int CONTINUE_BIT = 0b10000000;
+    private static final int MAX_BYTES = (int) Math.ceil((double) Integer.SIZE / BITS_PER_BYTE);
+
+    public static void encode(int value, OutputStream outputStream) throws IOException {
+        while (value != 0) {
+            int bits = value & READ_BITS_MASK;
+            value >>>= BITS_PER_BYTE;
+            if (value != 0) {
+                bits |= CONTINUE_BIT;
+            }
+            outputStream.write(bits);
+        }
+    }
+
+    public static int decode(InputStream inputStream) throws IOException {
+        int value = 0;
+        int shift = 0;
+        int b;
+        int bytesRead = 0;
+
+        while (bytesRead++ < MAX_BYTES && (b = inputStream.read()) != -1) {
+            int bits = b & READ_BITS_MASK;
+            value |= bits << shift;
+            shift += BITS_PER_BYTE;
+            if ((b & CONTINUE_BIT) == 0) {
+                break;
+            }
+        }
+
+        return value;
+    }
+}
 
 class BitSegment {
     private final int size;
@@ -90,24 +124,21 @@ class HuffmanFrequencies {
 
     public void serialize(OutputStream outputStream) throws IOException {
         int nonZeroFrequencies = (int) Arrays.stream(frequencies).filter(x -> x != 0).count();
-        DataOutputStream dataOutputStream = new DataOutputStream(outputStream);
-        dataOutputStream.writeByte(nonZeroFrequencies);
+        outputStream.write(nonZeroFrequencies);
         for (int i = 0; i < frequencies.length; i++) {
             if (frequencies[i] != 0) {
-                dataOutputStream.writeByte(i);
-                dataOutputStream.writeInt(frequencies[i]);
+                outputStream.write(i);
+                VariableWidthEncoding.encode(frequencies[i], outputStream);
             }
         }
-        dataOutputStream.flush();
     }
 
     public static HuffmanFrequencies deserialize(InputStream inputStream) throws IOException {
         HuffmanFrequencies instance = new HuffmanFrequencies();
-        DataInputStream dataInputStream = new DataInputStream(inputStream);
-        int frequencyCount = dataInputStream.readByte() & 0xFF;
+        int frequencyCount = inputStream.read() & 0xFF;
         for (int i = 0; i < frequencyCount; i++) {
-            byte c = dataInputStream.readByte();
-            int frequency = dataInputStream.readInt();
+            byte c = (byte) inputStream.read();
+            int frequency = VariableWidthEncoding.decode(inputStream);
             instance.setFrequency(c, frequency);
         }
         return instance;
@@ -269,7 +300,7 @@ class HuffmanAlgorithm {
         }
 
         frequencies.serialize(outputStream);
-        new DataOutputStream(outputStream).writeInt(length);
+        VariableWidthEncoding.encode(length, outputStream);
 
         System.out.printf("Compressing block (%d B)...%n", length);
         BitBuffer bitBuffer = new BitBuffer();
@@ -301,7 +332,7 @@ class HuffmanAlgorithm {
     private int decompressBlock(byte[] block) throws IOException {
         System.out.println("Reading frequency table..");
         HuffmanFrequencies frequencies = HuffmanFrequencies.deserialize(inputStream);
-        int blockLength = new DataInputStream(inputStream).readInt();
+        int blockLength = VariableWidthEncoding.decode(inputStream);
 
         System.out.printf("Decompressing block (%d B)...%n", blockLength);
         byte[] decodeBuffer = new byte[Byte.SIZE];
