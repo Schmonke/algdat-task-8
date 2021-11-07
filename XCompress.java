@@ -1,106 +1,214 @@
+import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
 import java.io.DataOutputStream;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.BitSet;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.PriorityQueue;
 import java.util.Stack;
 
-class HuffmanTree {
-    int[] frequencies = new int[256];
-    BitSet[] encodeLut = new BitSet[256];
-    Node root;
+class BitSegment {
+    private final int size;
+    private final long bits;
 
+    public BitSegment(int size, long bits) {
+        this.size = size;
+        this.bits = bits;
+    }
+
+    public int getSize() {
+        return size;
+    }
+
+    public long getBits() {
+        return bits;
+    }
+
+    @Override
+    public String toString() {
+        StringBuilder builder = new StringBuilder(size);
+        for (int i = size - 1; i >= 0; i--) {
+            builder.append((bits & (1 << i)) >> i);
+        }
+        return builder.toString();
+    }
+}
+
+class BitBuffer {
+    private int size = 0;
+    private long bits = 0;
+
+    public void add(BitSegment bitSegment) {
+        long newBits = bitSegment.getBits();
+        int newBitsSize = bitSegment.getSize();
+        size += newBitsSize;
+        bits = (bits << newBitsSize) | newBits;
+    }
+
+    public int read() {
+        if (size < 8) {
+            return -1;
+        }
+        int shift = size - Byte.SIZE;
+        int b = (int) ((bits & (0xFF << shift)) >> shift);
+        size -= Byte.SIZE;
+        return b;
+    }
+
+    public int readFinal() {
+        return 0xFF;
+    }
+}
+
+class Constants {
+    public static final int BYTE_MAX_POSSIBILITIES = 1 << Byte.SIZE;
+}
+
+class HuffmanFrequencies {
+    int[] frequencies = new int[Constants.BYTE_MAX_POSSIBILITIES];
+
+    private void setFrequency(byte c, int frequency) {
+        frequencies[c & 0xFF] = frequency;
+    }
 
     public void increment(byte c) {
         frequencies[c & 0xFF]++;
     }
 
-    private long[] createEncodeLut() {
+    public int[] getFrequencies() {
+        return frequencies.clone();
+    }
+
+    public void serialize(OutputStream outputStream) throws IOException {
+        int nonZeroFrequencies = (int) Arrays.stream(frequencies).filter(x -> x != 0).count();
+        DataOutputStream dataOutputStream = new DataOutputStream(outputStream);
+        dataOutputStream.writeByte(nonZeroFrequencies);
+        for (int i = 0; i < frequencies.length; i++) {
+            if (frequencies[i] != 0) {
+                dataOutputStream.writeByte(i);
+                dataOutputStream.writeInt(frequencies[i]);
+            }
+        }
+        dataOutputStream.flush();
+    }
+
+    public static HuffmanFrequencies deserialize(InputStream inputStream) throws IOException {
+        HuffmanFrequencies instance = new HuffmanFrequencies();
+        DataInputStream dataInputStream = new DataInputStream(inputStream);
+        int frequencyCount = dataInputStream.readByte() & 0xFF;
+        for (int i = 0; i < frequencyCount; i++) {
+            byte c = dataInputStream.readByte();
+            int frequency = dataInputStream.readInt();
+            instance.setFrequency(c, frequency);
+        }
+        return instance;
+    }
+}
+
+class HuffmanTree {
+    private final BitSegment[] encodeLut;
+    private final Node root;
+    private Node decodeNode;
+
+    public HuffmanTree(HuffmanFrequencies frequencies) {
+        root = generateTree(frequencies.getFrequencies());
+        decodeNode = root;
+        encodeLut = createEncodeLut(root);
+    }
+
+    public BitSegment encode(byte c) {
+        return encodeLut[c & 0xFF];
+    }
+
+    public int decode(byte c, byte[] out) {
+        int bytes = 0;
+        for (int i = Byte.SIZE - 1; i >= 0; i--) {
+            int bit = (c >> i) & 1;
+            decodeNode = decodeNode.getChild(bit);
+            if (decodeNode.isLeaf()) {
+                out[bytes++] = decodeNode.getValue();
+                decodeNode = root;
+            }
+        }
+        return bytes;
+    }
+
+    private BitSegment[] createEncodeLut(Node root) {
         class Entry {
             public final Node node;
-            public final BitSet bits;
-            public Entry(Node node, BitSet bits) {
+            public final BitSegment bits;
+
+            public Entry(Node node, BitSegment bits) {
                 this.node = node;
                 this.bits = bits;
             }
         }
-        BitSet[] encodeLut = new BitSet[256];
+        BitSegment[] encodeLut = new BitSegment[Constants.BYTE_MAX_POSSIBILITIES];
+        if (root == null) {
+            return encodeLut;
+        }
+
         Stack<Entry> stack = new Stack<>();
 
-        stack.push(new Entry(root, new BitSet(0)));
-    
+        stack.push(new Entry(root, new BitSegment(0, 0)));
+
         while (stack.size() > 0) {
             Entry entry = stack.pop();
             Node node = entry.node;
             if (node.isLeaf()) {
-                BitSet bitSet = new BitSet(entry.bitCount);
-                bitSet.
-                encodeLut[entry.node.value & 0xFF]
+                encodeLut[entry.node.value & 0xFF] = entry.bits;
                 continue;
             }
+
+            int newSize = entry.bits.getSize() + 1;
+            long oldBits = entry.bits.getBits();
+
             Node left = node.getChild(0);
             Node right = node.getChild(1);
 
+            BitSegment leftBits = new BitSegment(newSize, oldBits << 1);
+            BitSegment rightBits = new BitSegment(newSize, (oldBits << 1) | 1);
 
-            stack.push(new Entry(right, entry.bitCount + 1, (entry.bits << 1) | 1));
-            stack.push(new Entry(left, entry.bitCount + 1, (entry.bits << 1) | 0));
+            stack.push(new Entry(right, rightBits));
+            stack.push(new Entry(left, leftBits));
         }
 
         return encodeLut;
     }
 
-    private Node generateTree() {
-        Comparator<Node> nodeComparator = Comparator.comparing(Node::getFrequency, Comparator.reverseOrder());
+    private Node generateTree(int[] frequencies) {
+        Comparator<Node> nodeComparator = Comparator.comparing(Node::getFrequency);
         PriorityQueue<Node> nodes = new PriorityQueue<>(frequencies.length, nodeComparator);
 
         for (int i = 0; i < frequencies.length; i++) {
             if (frequencies[i] != 0) {
-                nodes.add(new Node(frequencies[i], (byte)i));
+                nodes.add(new Node(frequencies[i], (byte) i));
             }
         }
-        
+
         while (nodes.size() > 1) {
-            Node left = nodes.poll();
             Node right = nodes.poll();
+            Node left = nodes.poll();
             Node parent = new Node(left, right);
             nodes.add(parent);
         }
-        
+
         return nodes.poll();
-    }
-
-    public void serialize(OutputStream outputStream) throws IOException {
-        byte[] bytes = new byte[frequencies.length * Integer.SIZE];
-        ByteBuffer byteBuffer = ByteBuffer.wrap(bytes);
-        for (int i = 0; i < frequencies.length; i++) {
-            byteBuffer.putInt(frequencies[i]);
-        }
-        outputStream.write(bytes);
-    }
-
-    public void deserialize(InputStream inputStream) throws IOException {
-        byte[] bytes = inputStream.readNBytes(frequencies.length * Integer.SIZE);
-        ByteBuffer byteBuffer = ByteBuffer.wrap(bytes);
-        for (int i = 0; i < frequencies.length; i++) {
-            frequencies[i] = byteBuffer.getInt();
-        }
     }
 
     static class Node {
         public Node(Node left, Node right) {
             this.left = left;
             this.right = right;
-            if (left != null) this.frequency += left.frequency;
-            if (right != null) this.frequency += right.frequency;
+            if (left != null)
+                this.frequency += left.frequency;
+            if (right != null)
+                this.frequency += right.frequency;
         }
 
         public Node(int frequency, byte value) {
@@ -127,47 +235,131 @@ class HuffmanTree {
 
         public Node getChild(int pos) {
             switch (pos) {
-                case 0: return left;
-                case 1: return right;
-                default: throw new IllegalArgumentException("pos must be 0 or 1");
+            case 0:
+                return left;
+            case 1:
+                return right;
+            default:
+                throw new IllegalArgumentException("pos must be 0 or 1");
             }
         }
     }
 }
 
 class HuffmanAlgorithm {
-    private static final int READ_BUFFER_SIZE = 16384;
+    private static final int BLOCK_SIZE = 16777220; // 16 MiB
+    private static final short MAGIC = 'H' << 8 | 'F';
 
-    byte[] compress(byte[] data) throws IOException {
-        HuffmanTable huffTable = new HuffmanTable();
-        byte[] bytes = new byte[READ_BUFFER_SIZE];
-        int bytesRead = -1;
+    private final InputStream inputStream;
+    private final OutputStream outputStream;
 
-        for (int i = 0; i < data.length; i++) {
-            huffTable.increment(data[i]);
-        }
-
-
-
-        return null;
+    public HuffmanAlgorithm(InputStream inputStream, OutputStream outputStream) {
+        this.inputStream = new BufferedInputStream(inputStream);
+        this.outputStream = new BufferedOutputStream(outputStream);
     }
 
-    void decompress() {
+    private void compressBlock(byte[] block, int length) throws IOException {
+        System.out.println("Constructing frequency table...");
+        HuffmanFrequencies frequencies = new HuffmanFrequencies();
+        for (int i = 0; i < length; i++) {
+            frequencies.increment(block[i]);
+        }
+        System.out.printf("FREQC: %d%n", Arrays.stream(frequencies.getFrequencies()).filter(x -> x != 0).count());
 
+        frequencies.serialize(outputStream);
+        new DataOutputStream(outputStream).writeInt(length);
+
+        System.out.println("Compressing block...");
+        BitBuffer bitBuffer = new BitBuffer();
+        HuffmanTree tree = new HuffmanTree(frequencies);
+        for (int i = 0; i < length; i++) {
+            BitSegment bitSegment = tree.encode(block[i]);
+            bitBuffer.add(bitSegment);
+            int b = bitBuffer.read();
+            if (b != -1) {
+                outputStream.write(b);
+            }
+        }
+    }
+
+    public void compress() throws IOException {
+        byte[] block = new byte[BLOCK_SIZE];
+        int length;
+        while ((length = inputStream.read(block)) != -1) {
+            compressBlock(block, length);
+        }
+        outputStream.flush();
+    }
+
+    private int decompressBlock(byte[] block) throws IOException {
+        System.out.println("Reading frequency table..");
+        HuffmanFrequencies frequencies = HuffmanFrequencies.deserialize(inputStream);
+        int blockLength = new DataInputStream(inputStream).readInt();
+        System.out.printf("FREQC: %d%n", Arrays.stream(frequencies.getFrequencies()).filter(x -> x != 0).count());
+
+        System.out.println("Decompressing block...");
+        byte[] decodeBuffer = new byte[Byte.SIZE];
+        HuffmanTree tree = new HuffmanTree(frequencies);
+        for (int i = 0; i < blockLength;) {
+            int bits = inputStream.read();
+            if (bits == -1) {
+                throw new IOException("Unexpected end of data.");
+            }
+            int bytes = tree.decode((byte) bits, decodeBuffer);
+            for (int j = 0; j < bytes; j++) {
+                block[i++] = decodeBuffer[j];
+                if (i >= blockLength) {
+                    break;
+                }
+            }
+        }
+
+        return blockLength;
+    }
+
+    public void decompress() throws IOException {
+        byte[] block = new byte[BLOCK_SIZE];
+        int length;
+        while (true) {
+            length = decompressBlock(block);
+            outputStream.write(block, 0, length);
+
+            inputStream.mark(1);
+            if (inputStream.read() == -1) {
+                break;
+            }
+            inputStream.reset();
+        }
+        outputStream.flush();
     }
 }
 
 class XCompress {
-    public static void compress(String[] args) {
+    public static void compress(String[] args) throws IOException {
         if (args.length == 0) {
             System.out.println("No filepath was provided.");
         }
 
+        byte[] b = new byte[256];
+        for (int i = 0; i < 256; i++) {
+            b[i] = (byte) i;
+        }
+
+        try (FileInputStream inputStream = new FileInputStream(args[0]);
+                FileOutputStream outputStream = new FileOutputStream(args[1]);) {
+            new HuffmanAlgorithm(inputStream, outputStream).compress();
+        }
     }
 
-    public static void decompress(String[] args) {
+    public static void decompress(String[] args) throws IOException {
         if (args.length == 0) {
             System.out.println("No filepath was provided.");
+        }
+
+        try (FileInputStream inputStream = new FileInputStream(args[0]);
+                FileOutputStream outputStream = new FileOutputStream(args[1]);) {
+
+            new HuffmanAlgorithm(inputStream, outputStream).decompress();
         }
     }
 
@@ -175,18 +367,18 @@ class XCompress {
         System.out.println("You must specify a flag (-c, -d or -h) and a file path.");
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws IOException {
         String flag = args.length >= 1 ? args[0] : null;
         switch (flag) {
-            case "-c": 
-                compress(Arrays.copyOfRange(args, 1, args.length));
-                break;
-            case "-d": 
-                decompress(Arrays.copyOfRange(args, 1, args.length));
-                break;
-            case "-h": 
-                printHelp();
-                break;
+        case "-c":
+            compress(Arrays.copyOfRange(args, 1, args.length));
+            break;
+        case "-d":
+            decompress(Arrays.copyOfRange(args, 1, args.length));
+            break;
+        case "-h":
+            printHelp();
+            break;
         }
     }
 }
