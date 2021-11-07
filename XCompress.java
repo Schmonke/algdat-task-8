@@ -61,7 +61,10 @@ class BitBuffer {
     }
 
     public int readFinal() {
-        return 0xFF;
+        if (size == 0) {
+            return -1;
+        }
+        return (int) (bits << (Byte.SIZE - size));
     }
 }
 
@@ -248,7 +251,6 @@ class HuffmanTree {
 
 class HuffmanAlgorithm {
     private static final int BLOCK_SIZE = 16777220; // 16 MiB
-    private static final short MAGIC = 'H' << 8 | 'F';
 
     private final InputStream inputStream;
     private final OutputStream outputStream;
@@ -264,7 +266,6 @@ class HuffmanAlgorithm {
         for (int i = 0; i < length; i++) {
             frequencies.increment(block[i]);
         }
-        System.out.printf("FREQC: %d%n", Arrays.stream(frequencies.getFrequencies()).filter(x -> x != 0).count());
 
         frequencies.serialize(outputStream);
         new DataOutputStream(outputStream).writeInt(length);
@@ -279,6 +280,10 @@ class HuffmanAlgorithm {
             if (b != -1) {
                 outputStream.write(b);
             }
+        }
+        int b = bitBuffer.readFinal();
+        if (b != -1) {
+            outputStream.write(b);
         }
     }
 
@@ -295,7 +300,6 @@ class HuffmanAlgorithm {
         System.out.println("Reading frequency table..");
         HuffmanFrequencies frequencies = HuffmanFrequencies.deserialize(inputStream);
         int blockLength = new DataInputStream(inputStream).readInt();
-        System.out.printf("FREQC: %d%n", Arrays.stream(frequencies.getFrequencies()).filter(x -> x != 0).count());
 
         System.out.println("Decompressing block...");
         byte[] decodeBuffer = new byte[Byte.SIZE];
