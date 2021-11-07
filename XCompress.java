@@ -64,7 +64,8 @@ class BitBuffer {
         if (size == 0) {
             return -1;
         }
-        return (int) (bits << (Byte.SIZE - size));
+        int b = (int) (bits & ((1 << size) - 1)) << (Byte.SIZE - size);
+        return b;
     }
 }
 
@@ -270,14 +271,15 @@ class HuffmanAlgorithm {
         frequencies.serialize(outputStream);
         new DataOutputStream(outputStream).writeInt(length);
 
-        System.out.println("Compressing block...");
+        System.out.printf("Compressing block (%d B)...%n", length);
         BitBuffer bitBuffer = new BitBuffer();
         HuffmanTree tree = new HuffmanTree(frequencies);
+
         for (int i = 0; i < length; i++) {
             BitSegment bitSegment = tree.encode(block[i]);
             bitBuffer.add(bitSegment);
-            int b = bitBuffer.read();
-            if (b != -1) {
+            int b;
+            while ((b = bitBuffer.read()) != -1) {
                 outputStream.write(b);
             }
         }
@@ -301,7 +303,7 @@ class HuffmanAlgorithm {
         HuffmanFrequencies frequencies = HuffmanFrequencies.deserialize(inputStream);
         int blockLength = new DataInputStream(inputStream).readInt();
 
-        System.out.println("Decompressing block...");
+        System.out.printf("Decompressing block (%d B)...%n", blockLength);
         byte[] decodeBuffer = new byte[Byte.SIZE];
         HuffmanTree tree = new HuffmanTree(frequencies);
         for (int i = 0; i < blockLength;) {
@@ -342,11 +344,6 @@ class XCompress {
     public static void compress(String[] args) throws IOException {
         if (args.length == 0) {
             System.out.println("No filepath was provided.");
-        }
-
-        byte[] b = new byte[256];
-        for (int i = 0; i < 256; i++) {
-            b[i] = (byte) i;
         }
 
         try (FileInputStream inputStream = new FileInputStream(args[0]);
