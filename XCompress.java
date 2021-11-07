@@ -1,6 +1,10 @@
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInput;
 import java.io.DataInputStream;
+import java.io.DataOutput;
 import java.io.DataOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -66,6 +70,56 @@ class BitBuffer {
         }
         int b = (int) (bits & ((1 << size) - 1)) << (Byte.SIZE - size);
         return b;
+    }
+}
+
+class VariableWidthEncoder {
+    // First bit of every byte decides whether the next byte is a continuation byte
+    // (up to 5 continuous bytes).
+
+    private static final int[] BYTE_ALIGN_PAD = { 0, 0, 0, 6 };
+    private static final int[] VALUE_WIDTHS = { Byte.SIZE - 2, Short.SIZE - 2, 24 - 2, Integer.SIZE - 2, Integer.SIZE };
+
+    public static int decode(DataInput dataInput) throws IOException {
+        int firstByte = dataInput.readByte() & 0xFF;
+        int offset = Long.BYTES;
+        int widthIndex = firstByte >> 6;
+        int width = VALUE_WIDTHS[widthIndex];
+        int bytesLeft = ((width + 2) / 8) - 1;
+        offset = (width + 2) / 8;
+
+        long data = (firstByte & 0b00111111) << (--offset * 8);
+        for (int i = 0; i < bytesLeft; i++) {
+            data |= (dataInput.readByte() & 0xFF) << (--offset * 8);
+        }
+        return (int) (data >> BYTE_ALIGN_PAD[widthIndex]);
+    }
+
+    private static void encodeWidth(int value, int widthIndex, DataOutput dataOutput) throws IOException {
+        int valueBitWidth = VALUE_WIDTHS[widthIndex];
+        int actualWidth = valueBitWidth + 2;
+        long data = ((long) widthIndex << valueBitWidth) | value & 0xFFFFFFFFL;
+        data <<= BYTE_ALIGN_PAD[widthIndex];
+        int totalWidth = actualWidth + BYTE_ALIGN_PAD[widthIndex];
+        System.out.printf("ACTUALWIDTH: %d%n", actualWidth);
+        for (int i = totalWidth - 8; i >= 0; i -= 8) {
+            System.out.printf("(%d)", i);
+            System.out.printf("%X ", (int) ((data >> i) & 0xFF));
+            dataOutput.write((int) ((data >> i) & 0xFF));
+        }
+        System.out.println();
+    }
+
+    public static void encode(int value, DataOutput dataOutput) throws IOException {
+        int widthIndex = -1;
+        for (int i = 0; i < VALUE_WIDTHS.length; i++) {
+            long maxValue = (1L << VALUE_WIDTHS[i]) - 1L;
+            if (value <= maxValue) {
+                widthIndex = i;
+                break;
+            }
+        }
+        encodeWidth(value, widthIndex, dataOutput);
     }
 }
 
@@ -344,6 +398,30 @@ class XCompress {
     public static void compress(String[] args) throws IOException {
         if (args.length == 0) {
             System.out.println("No filepath was provided.");
+        }
+
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        VariableWidthEncoder.encode(0x40000000, new DataOutputStream(bo));
+        byte[] bs = bo.toByteArray();
+        int v = VariableWidthEncoder.decode(new DataInputStream(new ByteArrayInputStream(bs)));
+        int testValue = 0x40000000;
+        if (v != testValue) {
+            System.out.printf("INEQUAL!!(READ != ACTU): %X != %X%n", v, testValue);
+            throw new IllegalStateException("Oopsie encountered!");
+        }
+
+        for (int i = (Integer.MAX_VALUE / 2) - Short.MAX_VALUE * 128; i <= Integer.MAX_VALUE; i++) {
+            if (i % (Short.MAX_VALUE * 128) == 0) {
+                System.out.printf("%.2f %% done%n", ((double) i / (double) Integer.MAX_VALUE) * 100);
+            }
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            VariableWidthEncoder.encode(i, new DataOutputStream(baos));
+            byte[] barr = baos.toByteArray();
+            int value = VariableWidthEncoder.decode(new DataInputStream(new ByteArrayInputStream(barr)));
+            if (value != i) {
+                System.out.printf("INEQUAL!!(READ != ACTU): %X != %X%n", value, i);
+                throw new IllegalStateException("Oopsie encountered!");
+            }
         }
 
         try (FileInputStream inputStream = new FileInputStream(args[0]);
