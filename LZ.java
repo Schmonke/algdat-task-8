@@ -248,21 +248,25 @@ class Window {
     }
 
     public void slideForward(int bytes) {
-        offset += bytes;
+        if (limit - offset >= windowSize) {
+            offset += bytes;
+        }
     }
 
     public Match findMatch(CompositeBuffer lookaheadBuffer, int offset, int length) {
         int matchIndex = -1;
         int matchLength = 0;
         for (int i = this.offset; i < this.limit; i++) {
-            for (int j = 0; offset + j < length && i + j < this.limit; j++) {
+            int j;
+            int jMax = Math.min(length - offset, this.limit - i);
+            for (j = 0; j < jMax; j++) {
                 if (buffer.get(i + j) != lookaheadBuffer.get(offset + j)) {
-                    if (j > matchLength) {
-                        matchIndex = i;
-                        matchLength = j;
-                    }
                     break;
                 }
+            }
+            if (j > matchLength) {
+                matchIndex = i;
+                matchLength = j;
             }
         }
         if (matchLength > minMatchLength) {
@@ -325,11 +329,13 @@ class LempelZivAlgorithm {
         OutputWriter outputWriter = new OutputWriter(OUTPUT_CHUNK_SIZE);
 
         // Write initial block
-        int initialBlockBytes = Math.min(OutputWriter.MAX_ENTRIES * OutputWriter.BYTE_ENTRY_SIZE, buffer.length());
-        for (int i = 0; i < initialBlockBytes; i++) {
-            System.out.printf("%c", buffer.get(i));
-            outputWriter.writeByte(buffer.get(i));
-        }
+        int initialBlockBytes = 0;
+        /*
+         * int initialBlockBytes = Math.min(OutputWriter.MAX_ENTRIES *
+         * OutputWriter.BYTE_ENTRY_SIZE, buffer.length()); for (int i = 0; i <
+         * initialBlockBytes; i++) { System.out.printf("%c", buffer.get(i));
+         * outputWriter.writeByte(buffer.get(i)); }
+         */
 
         // fill read-buffer with first arrays
         for (int lookaheadIndex = initialBlockBytes; lookaheadIndex < buffer.length();) {
