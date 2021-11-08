@@ -156,12 +156,19 @@ class OutputWriter {
     // returned until the first byte is written into it.
 
     private void finalizeEntryBlock() {
+        if (entryCount == 0) {
+            return;
+        }
+
         int multiplier = isCompressed ? -1 : 1;
         blockStartArray[blockStartIndex] = (byte) (entryCount * multiplier);
         if (blockStartArray != outputChunk) {
             finalizedOutput = blockStartArray;
-            blockStartArray = outputChunk;
         }
+
+        allocateNewChunkIfFull();
+        blockStartIndex = entryIndex++;
+        blockStartArray = outputChunk;
     }
 
     private void allocateNewChunkIfFull() {
@@ -170,6 +177,12 @@ class OutputWriter {
         }
         entryIndex = 0;
         outputChunk = new byte[outputChunkSize];
+    }
+
+    private void incrementEntryCount() {
+        if (++entryCount == MAX_ENTRIES) {
+            finalizeEntryBlock();
+        }
     }
 
     private void setCompressed(boolean compressed) {
@@ -190,7 +203,7 @@ class OutputWriter {
                 allocateNewChunkIfFull();
             }
         }
-        entryCount++;
+        incrementEntryCount();
     }
 
     public void writeByte(byte b) {
@@ -198,7 +211,7 @@ class OutputWriter {
         allocateNewChunkIfFull();
 
         outputChunk[entryIndex++] = b;
-        entryCount++;
+        incrementEntryCount();
     }
 
     public byte[] getFullChunk() {
@@ -238,34 +251,25 @@ class Window {
         offset += bytes;
     }
 
-    private int findSliceInWindow(CompositeBuffer lookaheadBuffer, int offset, int length) {
+    public Match findMatch(CompositeBuffer lookaheadBuffer, int offset, int length) {
+        int matchIndex = -1;
+        int matchLength = 0;
         for (int i = this.offset; i < this.limit; i++) {
-            for (int j = 0; j < length && i + j < this.limit; j++) {
-                if (buffer.get(i + j) != lookaheadBuffer.get(j)) {
+            for (int j = 0; offset + j < length && i + j < this.limit; j++) {
+                if (buffer.get(i + j) != lookaheadBuffer.get(offset + j)) {
+                    if (j > matchLength) {
+                        matchIndex = i;
+                        matchLength = j;
+                    }
                     break;
-                } else if (j == length - 1) {
-                    return j;
                 }
             }
         }
-        return -1;
-    }
-
-    public Match findMatch(CompositeBuffer lookaheadBuffer, int offset, int length) { // Length of lookaheadbuffer
-        // Loop backwards over length
-        // Loop over each pos from window start to end, break if segment length >
-        // (windowlength - offset)
-        //
-        // Try to find the slice inside the window
-        Match match = null;
-        for (int i = length; i >= this.minMatchLength && match == null; i--) {
-            System.out.println(i);
-            int matchIndex = findSliceInWindow(lookaheadBuffer, offset, i);
-            if (matchIndex != -1) {
-                match = new Match(windowSize - matchIndex, i);
-            }
+        if (matchLength > minMatchLength) {
+            return new Match(this.limit - matchIndex, matchLength);
+        } else {
+            return null;
         }
-        return match;
     }
 
     public byte getByte(int index) {
@@ -323,32 +327,39 @@ class LempelZivAlgorithm {
         // Write initial block
         int initialBlockBytes = Math.min(OutputWriter.MAX_ENTRIES * OutputWriter.BYTE_ENTRY_SIZE, buffer.length());
         for (int i = 0; i < initialBlockBytes; i++) {
+            System.out.printf("%c", buffer.get(i));
             outputWriter.writeByte(buffer.get(i));
         }
 
         // fill read-buffer with first arrays
-        for (int lookaheadIndex = initialBlockBytes; lookaheadIndex < buffer.length(); lookaheadIndex++) {
-            System.out.println("MONKALOOP!!!!");
+        for (int lookaheadIndex = initialBlockBytes; lookaheadIndex < buffer.length();) {
             if (lookaheadIndex >= 2 * CHUNK_SIZE) {
                 int moveBack = readChunkIntoCompositeBuffer(buffer, inputStream);
                 lookaheadIndex -= moveBack;
                 window.slideBack(moveBack);
             }
-            int lookaheadLength = Math.min(CHUNK_SIZE, buffer.length());
 
+            int remainingLookahead = Math.min(CHUNK_SIZE, buffer.length() - lookaheadIndex);
             window.setLimit(lookaheadIndex);
-            System.out.println("where match 🤔");
-            Match match = window.findMatch(buffer, lookaheadIndex, lookaheadLength);
-            System.out.println("we got em");
+            Match match = window.findMatch(buffer, lookaheadIndex, lookaheadIndex + remainingLookahead);
+            int moveForward = 0;
             if (match == null) {
+                System.out.printf("%c", buffer.get(lookaheadIndex));
                 outputWriter.writeByte(buffer.get(lookaheadIndex));
+                moveForward = 1;
             } else {
+                System.out.printf("(%d, %d)", match.getDistance(), match.getLength());
+                moveForward = match.getLength();
                 outputWriter.writeMatch(match);
             }
+
             byte[] output = outputWriter.getFullChunk();
             if (output != null) {
                 outputStream.write(output);
             }
+
+            window.slideForward(moveForward);
+            lookaheadIndex += moveForward;
         }
 
         ArrayWithSize finalOutput = outputWriter.getFinalChunk();
