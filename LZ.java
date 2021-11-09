@@ -9,7 +9,6 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.ArrayList;
 import java.util.Arrays;
 
 class Match {
@@ -336,7 +335,6 @@ class LempelZivAlgorithm {
 
         readChunkIntoRingBuffer(buffer);
 
-        int iter = 0;
         boolean moreDataInStream = true;
         // fill read-buffer with first arrays
         for (int lookaheadIndex = 0; lookaheadIndex < buffer.getSize();) {
@@ -349,10 +347,6 @@ class LempelZivAlgorithm {
                 lookaheadIndex -= moveBack;
             }
             window.setDivider(lookaheadIndex);
-
-            if (++iter % 10_000 == 0) {
-                System.out.println(iter);
-            }
 
             Match match = window.findMatch();
             if (match == null) {
