@@ -65,57 +65,61 @@ class ArrayWithSize {
     }
 }
 
-class CompositeBuffer {
-    private final int maxBufferCount;
-    private final int bufferSize;
-    private final int bufferSizeExponentOf2;
-    private final ArrayList<byte[]> buffers;
-    private int sizeOfLastBuffer = 0;
+class RingBuffer {
+    private final byte[] buffer;
+    private final int indexMask;
+    private int startIndex = 0;
+    private int endIndex = 0;
+    private int size = 0;
 
-    public CompositeBuffer(int bufferCount, int bufferSize) {
-        if (Integer.highestOneBit(bufferSize) != bufferSize) {
-            throw new IllegalArgumentException("buffer size was not power of 2");
+    public RingBuffer(int capacity) {
+        if (Integer.highestOneBit(capacity) != capacity) {
+            throw new IllegalArgumentException("capacity was not power of 2");
         }
-        this.bufferSizeExponentOf2 = Integer.numberOfTrailingZeros(bufferSize);
-        this.bufferSize = bufferSize;
-        this.sizeOfLastBuffer = bufferSize;
-        this.maxBufferCount = bufferCount;
-        this.buffers = new ArrayList<>(bufferCount);
+        indexMask = ~(1 << Integer.numberOfTrailingZeros(capacity));
+        buffer = new byte[capacity];
     }
 
-    public int push(ArrayWithSize buffer) {
-        if (sizeOfLastBuffer != bufferSize) {
-            throw new IllegalArgumentException("Cannot push an array after pushing an array smaller than buffer size");
-        }
-        byte[] popped = null;
-        if (buffers.size() > maxBufferCount - 1) {
-            popped = buffers.remove(0);
-        }
-        buffers.add(buffer.array);
-        sizeOfLastBuffer = buffer.size;
-
-        int moveBack = 0;
-        if (buffers.size() == 0) {
-            moveBack = sizeOfLastBuffer;
-        } else if (popped != null) {
-            moveBack = bufferSize;
-        }
-        return moveBack;
+    public int getSize() {
+        return size;
     }
 
-    public int length() {
-        return (buffers.size() - 1) * bufferSize + sizeOfLastBuffer;
+    private void pushByte(byte b) {
+        buffer[endIndex] = b;
+        endIndex = (endIndex + 1) & indexMask;
+        size++;
+    }
+
+    public void drop(int bytes) {
+        if (bytes > size) {
+            throw new IllegalStateException("cannot drop more than size");
+        }
+        startIndex = (startIndex + bytes) & indexMask;
+        size -= bytes;
+    }
+
+    public void add(byte b) {
+        if (size == buffer.length) {
+            throw new IllegalStateException("buffer is full");
+        }
+        pushByte(b);
+    }
+
+    public void addAll(byte[] array, int offset, int length) {
+        int count = length - offset;
+        if (size + count > buffer.length) {
+            throw new IllegalStateException("not enough space in buffer");
+        }
+        for (int i = offset; i < length; i++) {
+            pushByte(array[i]);
+        }
     }
 
     public byte get(int index) {
-        int bufferIndex = index >>> bufferSizeExponentOf2;
-        int relativeIndex = index - bufferIndex * bufferSize;
-
-        if (bufferIndex == buffers.size() - 1 && relativeIndex >= sizeOfLastBuffer) {
-            throw new IndexOutOfBoundsException();
+        if (index < 0 || index > size) {
+            throw new IndexOutOfBoundsException("attempted to read index " + index + " when size was " + size);
         }
-
-        return buffers.get(bufferIndex)[relativeIndex];
+        return buffer[(startIndex + index) & indexMask];
     }
 }
 
@@ -234,43 +238,39 @@ class OutputWriter {
     }
 }
 
-class Window {
-    private final CompositeBuffer buffer;
+class SlidingWindow {
+    private final RingBuffer buffer;
     private final int windowSize;
+    private final int lookaheadSize;
     private final int minMatchLength;
     private int offset = 0;
-    private int limit = 0;
+    private int divider = 0;
 
-    public Window(CompositeBuffer buffer, int windowSize, int minMatchLength) {
+    public SlidingWindow(RingBuffer buffer, int windowSize, int lookaheadSize, int minMatchLength) {
         this.buffer = buffer;
         this.windowSize = windowSize;
+        this.lookaheadSize = lookaheadSize;
         this.minMatchLength = minMatchLength;
     }
 
-    public void setLimit(int index) {
-        limit = index;
-    }
-
-    public void slideBack(int bytes) {
-        offset -= bytes;
-    }
-
-    public void slideForward(int bytes) {
-        final int size = limit - offset;
-        if (size > windowSize) {
-            int maxSlide = size - windowSize;
-            offset += Math.max(bytes, maxSlide);
+    public void setDivider(int index) {
+        divider = index;
+        offset = divider - windowSize;
+        if (offset < 0) {
+            offset = 0;
         }
     }
 
-    public Match findMatch(CompositeBuffer lookaheadBuffer, int offset, int length) {
+    public Match findMatch() {
+        int lookaheadEnd = Math.min(lookaheadSize, buffer.getSize() - this.divider);
+
         int matchIndex = -1;
         int matchLength = 0;
-        for (int i = this.offset; i < this.limit; i++) {
+        for (int i = this.offset; i < this.divider; i++) {
             int j;
-            int jMax = Math.min(length - offset, this.limit - i);
+            int jMax = Math.min(lookaheadEnd, this.divider - i);
             for (j = 0; j < jMax; j++) {
-                if (buffer.get(i + j) != lookaheadBuffer.get(offset + j)) {
+                if (buffer.get(i + j) != buffer.get(this.divider + j)) {
                     break;
                 }
             }
@@ -279,15 +279,16 @@ class Window {
                 matchLength = j;
             }
         }
+
         if (matchLength > minMatchLength) {
-            return new Match(this.limit - matchIndex, matchLength);
+            return new Match(this.divider - matchIndex, matchLength);
         } else {
             return null;
         }
     }
 
     public byte getByte(int index) {
-        if (index < offset || index >= limit) {
+        if (index < offset || index >= divider) {
             throw new IndexOutOfBoundsException();
         }
 
@@ -297,9 +298,13 @@ class Window {
 
 class LempelZivAlgorithm {
     private static final int MIN_MATCH_LENGTH = Match.SERIALIZED_BYTES + 1; // 5bytes
-    private static final int CHUNK_SIZE = 16384; // 16 KiB
+
+    private static final int LOOKAHEAD_SIZE = 16384;
+    private static final int WINDOW_SIZE = 32768;
+    private static final int READ_CHUNK_SIZE = 131072; // 128 KiB
     private static final int OUTPUT_CHUNK_SIZE = 16777220; // 16 MiB
-    private static final int COMPOSITE_BUFFER_CHUNKS = 4;
+    private static final int RING_BUFFER_CAPACITY = 1048576; // 1 MiB
+    private static final int READ_THRESHOLD = RING_BUFFER_CAPACITY - Math.min(LOOKAHEAD_SIZE, WINDOW_SIZE);
 
     private final InputStream inputStream;
     private final OutputStream outputStream;
@@ -309,70 +314,49 @@ class LempelZivAlgorithm {
         this.outputStream = outputStream;
     }
 
-    private static CompositeBuffer createPreFilledBuffer(InputStream stream) throws IOException {
-        CompositeBuffer compositeBuffer = new CompositeBuffer(COMPOSITE_BUFFER_CHUNKS, CHUNK_SIZE);
-        int chunksRead = 0;
-        int bytesRead = 0;
-        byte[] buffer = new byte[CHUNK_SIZE];
-        while (chunksRead < COMPOSITE_BUFFER_CHUNKS && (bytesRead = stream.read(buffer, 0, buffer.length)) != -1) {
-            compositeBuffer.push(new ArrayWithSize(buffer, bytesRead));
-            chunksRead++;
-            buffer = new byte[CHUNK_SIZE];
-        }
-        while (chunksRead < COMPOSITE_BUFFER_CHUNKS) {
-            compositeBuffer.push(new ArrayWithSize(new byte[0], 0));
-            chunksRead++;
-        }
-        return compositeBuffer;
-    }
-
-    private static int readChunkIntoCompositeBuffer(CompositeBuffer buffer, InputStream stream) throws IOException {
-        byte[] array = new byte[CHUNK_SIZE];
-        int bytesRead = stream.read(array, 0, array.length);
+    private int readChunkIntoRingBuffer(RingBuffer buffer) throws IOException {
+        byte[] array = new byte[RING_BUFFER_CAPACITY - buffer.getSize()];
+        int bytesRead = inputStream.read(array);
         if (bytesRead != -1) {
-            return buffer.push(new ArrayWithSize(array, bytesRead));
+            buffer.addAll(array, 0, bytesRead);
+            return bytesRead;
         }
         return 0;
     }
 
     public void compress() throws IOException {
-        CompositeBuffer buffer = createPreFilledBuffer(inputStream);
-        Window window = new Window(buffer, CHUNK_SIZE, MIN_MATCH_LENGTH);
+        RingBuffer buffer = new RingBuffer(RING_BUFFER_CAPACITY);
+        SlidingWindow window = new SlidingWindow(buffer, WINDOW_SIZE, LOOKAHEAD_SIZE, MIN_MATCH_LENGTH);
         OutputWriter outputWriter = new OutputWriter(OUTPUT_CHUNK_SIZE);
 
+        readChunkIntoRingBuffer(buffer);
+
+        int iter = 0;
         boolean moreDataInStream = true;
         // fill read-buffer with first arrays
-        int iters = 0;
-        for (int lookaheadIndex = 0; lookaheadIndex < buffer.length();) {
-            if (moreDataInStream && lookaheadIndex >= (COMPOSITE_BUFFER_CHUNKS - 1) * CHUNK_SIZE) {
-                int moveBack = readChunkIntoCompositeBuffer(buffer, inputStream);
+        for (int lookaheadIndex = 0; lookaheadIndex < buffer.getSize();) {
+            if (moreDataInStream && lookaheadIndex >= READ_THRESHOLD) {
+                buffer.drop(READ_CHUNK_SIZE);
+                int moveBack = readChunkIntoRingBuffer(buffer);
                 if (moveBack == 0) {
                     moreDataInStream = false;
                 }
                 lookaheadIndex -= moveBack;
-                try {
-                    window.slideBack(moveBack);
-                } catch (IndexOutOfBoundsException e) {
-                    System.out.println(lookaheadIndex);
-                    throw e;
-                }
             }
-            if (iters % 10_000 == 0) {
-                System.out.printf("%f Miters%n", iters / 1_000_000.0);
-            }
-            iters++;
+            window.setDivider(lookaheadIndex);
 
-            int remainingLookahead = Math.min(CHUNK_SIZE, buffer.length() - lookaheadIndex);
-            window.setLimit(lookaheadIndex);
-            Match match = window.findMatch(buffer, lookaheadIndex, lookaheadIndex + remainingLookahead);
-            int moveForward = 0;
+            if (++iter % 10_000 == 0) {
+                System.out.println(iter);
+            }
+
+            Match match = window.findMatch();
             if (match == null) {
                 // System.out.printf("%c", buffer.get(lookaheadIndex) & 0xFF);
                 outputWriter.writeByte(buffer.get(lookaheadIndex));
-                moveForward = 1;
+                lookaheadIndex++;
             } else {
                 // System.out.printf("(%d, %d)", match.getDistance(), match.getLength());
-                moveForward = match.getLength();
+                lookaheadIndex += match.getLength();
                 outputWriter.writeMatch(match);
             }
 
@@ -381,9 +365,6 @@ class LempelZivAlgorithm {
                 System.out.println("WRITING CHUNK");
                 outputStream.write(output);
             }
-
-            window.slideForward(moveForward);
-            lookaheadIndex += moveForward;
         }
 
         ArrayWithSize finalOutput = outputWriter.getFinalChunk();
