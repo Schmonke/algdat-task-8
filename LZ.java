@@ -1,15 +1,13 @@
+import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.DataInput;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 
@@ -68,48 +66,56 @@ class ArrayWithSize {
 }
 
 class CompositeBuffer {
-    private final int bufferCount;
-    private final ArrayWithSize[] buffers;
+    private final int maxBufferCount;
+    private final int bufferSize;
+    private final int bufferSizeExponentOf2;
+    private final ArrayList<byte[]> buffers;
+    private int sizeOfLastBuffer = 0;
 
-    public CompositeBuffer(int bufferCount) {
-        this.bufferCount = bufferCount;
-        buffers = new ArrayWithSize[bufferCount];
-        for (int i = 0; i < bufferCount; i++) {
-            buffers[i] = new ArrayWithSize(new byte[0], 0);
+    public CompositeBuffer(int bufferCount, int bufferSize) {
+        if (Integer.highestOneBit(bufferSize) != bufferSize) {
+            throw new IllegalArgumentException("buffer size was not power of 2");
         }
+        this.bufferSizeExponentOf2 = Integer.numberOfTrailingZeros(bufferSize);
+        this.bufferSize = bufferSize;
+        this.sizeOfLastBuffer = bufferSize;
+        this.maxBufferCount = bufferCount;
+        this.buffers = new ArrayList<>(bufferCount);
     }
 
     public int push(ArrayWithSize buffer) {
-        int moveBackOffset = -buffers[0].size;
-        for (int i = 1; i < buffers.length; i++) {
-            buffers[i - 1] = buffers[i];
+        if (sizeOfLastBuffer != bufferSize) {
+            throw new IllegalArgumentException("Cannot push an array after pushing an array smaller than buffer size");
         }
-        buffers[buffers.length - 1] = buffer;
-        return moveBackOffset;
+        byte[] popped = null;
+        if (buffers.size() > maxBufferCount - 1) {
+            popped = buffers.remove(0);
+        }
+        buffers.add(buffer.array);
+        sizeOfLastBuffer = buffer.size;
+
+        int moveBack = 0;
+        if (buffers.size() == 0) {
+            moveBack = sizeOfLastBuffer;
+        } else if (popped != null) {
+            moveBack = bufferSize;
+        }
+        return moveBack;
     }
 
     public int length() {
-        int sum = 0;
-        for (int i = 0; i < buffers.length; i++) {
-            sum += buffers[i].size;
-        }
-        return sum;
+        return (buffers.size() - 1) * bufferSize + sizeOfLastBuffer;
     }
 
     public byte get(int index) {
-        int bufferIndex = -1;
-        int relativeIndex = index;
+        int bufferIndex = index >>> bufferSizeExponentOf2;
+        int relativeIndex = index - bufferIndex * bufferSize;
 
-        for (int i = 0; i < buffers.length && bufferIndex == -1; i++) {
-            if (relativeIndex < buffers[i].size) {
-                bufferIndex = i;
-            }
-        }
-        if (bufferIndex == -1) {
+        if (bufferIndex == buffers.size() - 1 && relativeIndex >= sizeOfLastBuffer) {
             throw new IndexOutOfBoundsException();
         }
 
-        return buffers[bufferIndex].array[relativeIndex];
+        return buffers.get(bufferIndex)[relativeIndex];
     }
 }
 
@@ -215,7 +221,9 @@ class OutputWriter {
     }
 
     public byte[] getFullChunk() {
-        return finalizedOutput;
+        byte[] fullChunk = finalizedOutput;
+        finalizedOutput = null;
+        return fullChunk;
     }
 
     public ArrayWithSize getFinalChunk() {
@@ -230,8 +238,8 @@ class Window {
     private final CompositeBuffer buffer;
     private final int windowSize;
     private final int minMatchLength;
-    int offset = 0;
-    int limit = 0;
+    private int offset = 0;
+    private int limit = 0;
 
     public Window(CompositeBuffer buffer, int windowSize, int minMatchLength) {
         this.buffer = buffer;
@@ -248,8 +256,10 @@ class Window {
     }
 
     public void slideForward(int bytes) {
-        if (limit - offset >= windowSize) {
-            offset += bytes;
+        final int size = limit - offset;
+        if (size > windowSize) {
+            int maxSlide = size - windowSize;
+            offset += Math.max(bytes, maxSlide);
         }
     }
 
@@ -289,25 +299,27 @@ class LempelZivAlgorithm {
     private static final int MIN_MATCH_LENGTH = Match.SERIALIZED_BYTES + 1; // 5bytes
     private static final int CHUNK_SIZE = 16384; // 16 KiB
     private static final int OUTPUT_CHUNK_SIZE = 16777220; // 16 MiB
+    private static final int COMPOSITE_BUFFER_CHUNKS = 4;
 
     private final InputStream inputStream;
     private final OutputStream outputStream;
 
     public LempelZivAlgorithm(InputStream inputStream, OutputStream outputStream) {
-        this.inputStream = inputStream;
+        this.inputStream = new BufferedInputStream(inputStream);
         this.outputStream = outputStream;
     }
 
     private static CompositeBuffer createPreFilledBuffer(InputStream stream) throws IOException {
-        CompositeBuffer compositeBuffer = new CompositeBuffer(CHUNK_SIZE * 3);
+        CompositeBuffer compositeBuffer = new CompositeBuffer(COMPOSITE_BUFFER_CHUNKS, CHUNK_SIZE);
         int chunksRead = 0;
         int bytesRead = 0;
         byte[] buffer = new byte[CHUNK_SIZE];
-        while (chunksRead < 3 && (bytesRead = stream.read(buffer, 0, buffer.length)) != -1) {
+        while (chunksRead < COMPOSITE_BUFFER_CHUNKS && (bytesRead = stream.read(buffer, 0, buffer.length)) != -1) {
             compositeBuffer.push(new ArrayWithSize(buffer, bytesRead));
             chunksRead++;
+            buffer = new byte[CHUNK_SIZE];
         }
-        while (chunksRead < 3) {
+        while (chunksRead < COMPOSITE_BUFFER_CHUNKS) {
             compositeBuffer.push(new ArrayWithSize(new byte[0], 0));
             chunksRead++;
         }
@@ -328,39 +340,45 @@ class LempelZivAlgorithm {
         Window window = new Window(buffer, CHUNK_SIZE, MIN_MATCH_LENGTH);
         OutputWriter outputWriter = new OutputWriter(OUTPUT_CHUNK_SIZE);
 
-        // Write initial block
-        int initialBlockBytes = 0;
-        /*
-         * int initialBlockBytes = Math.min(OutputWriter.MAX_ENTRIES *
-         * OutputWriter.BYTE_ENTRY_SIZE, buffer.length()); for (int i = 0; i <
-         * initialBlockBytes; i++) { System.out.printf("%c", buffer.get(i));
-         * outputWriter.writeByte(buffer.get(i)); }
-         */
-
+        boolean moreDataInStream = true;
         // fill read-buffer with first arrays
-        for (int lookaheadIndex = initialBlockBytes; lookaheadIndex < buffer.length();) {
-            if (lookaheadIndex >= 2 * CHUNK_SIZE) {
+        int iters = 0;
+        for (int lookaheadIndex = 0; lookaheadIndex < buffer.length();) {
+            if (moreDataInStream && lookaheadIndex >= (COMPOSITE_BUFFER_CHUNKS - 1) * CHUNK_SIZE) {
                 int moveBack = readChunkIntoCompositeBuffer(buffer, inputStream);
+                if (moveBack == 0) {
+                    moreDataInStream = false;
+                }
                 lookaheadIndex -= moveBack;
-                window.slideBack(moveBack);
+                try {
+                    window.slideBack(moveBack);
+                } catch (IndexOutOfBoundsException e) {
+                    System.out.println(lookaheadIndex);
+                    throw e;
+                }
             }
+            if (iters % 10_000 == 0) {
+                System.out.printf("%f Miters%n", iters / 1_000_000.0);
+            }
+            iters++;
 
             int remainingLookahead = Math.min(CHUNK_SIZE, buffer.length() - lookaheadIndex);
             window.setLimit(lookaheadIndex);
             Match match = window.findMatch(buffer, lookaheadIndex, lookaheadIndex + remainingLookahead);
             int moveForward = 0;
             if (match == null) {
-                System.out.printf("%c", buffer.get(lookaheadIndex));
+                // System.out.printf("%c", buffer.get(lookaheadIndex) & 0xFF);
                 outputWriter.writeByte(buffer.get(lookaheadIndex));
                 moveForward = 1;
             } else {
-                System.out.printf("(%d, %d)", match.getDistance(), match.getLength());
+                // System.out.printf("(%d, %d)", match.getDistance(), match.getLength());
                 moveForward = match.getLength();
                 outputWriter.writeMatch(match);
             }
 
             byte[] output = outputWriter.getFullChunk();
             if (output != null) {
+                System.out.println("WRITING CHUNK");
                 outputStream.write(output);
             }
 
