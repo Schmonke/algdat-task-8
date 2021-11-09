@@ -1,5 +1,9 @@
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -17,18 +21,20 @@ class VariableWidthEncoding {
     private static final int MAX_BYTES = (int) Math.ceil((double) Integer.SIZE / BITS_PER_BYTE);
 
     public static void encode(int value, OutputStream outputStream) throws IOException {
-        while (value != 0) {
+        new DataOutputStream(outputStream).writeInt(value);
+        /*while (value != 0) {
             int bits = value & READ_BITS_MASK;
             value >>>= BITS_PER_BYTE;
             if (value != 0) {
                 bits |= CONTINUE_BIT;
             }
             outputStream.write(bits);
-        }
+        }*/
     }
 
     public static int decode(InputStream inputStream) throws IOException {
-        int value = 0;
+        return new DataInputStream(inputStream).readInt();
+        /*int value = 0;
         int shift = 0;
         int b;
         int bytesRead = 0;
@@ -42,7 +48,7 @@ class VariableWidthEncoding {
             }
         }
 
-        return value;
+        return value;*/
     }
 }
 
@@ -67,7 +73,7 @@ class BitSegment {
     public String toString() {
         StringBuilder builder = new StringBuilder(size);
         for (int i = size - 1; i >= 0; i--) {
-            builder.append((bits & (1 << i)) >> i);
+            builder.append((bits & (1 << i)) >>> i);
         }
         return builder.toString();
     }
@@ -89,7 +95,7 @@ class BitBuffer {
             return -1;
         }
         int shift = size - Byte.SIZE;
-        int b = (int) ((bits & (0xFF << shift)) >> shift);
+        int b = (int) ((bits & (0xFF << shift)) >>> shift);
         size -= Byte.SIZE;
         return b;
     }
@@ -163,7 +169,7 @@ class HuffmanTree {
     public int decode(byte c, byte[] out) {
         int bytes = 0;
         for (int i = Byte.SIZE - 1; i >= 0; i--) {
-            int bit = (c >> i) & 1;
+            int bit = (c >>> i) & 1;
             decodeNode = decodeNode.getChild(bit);
             if (decodeNode.isLeaf()) {
                 out[bytes++] = decodeNode.getValue();
@@ -379,6 +385,9 @@ class XCompress {
 
         try (FileInputStream inputStream = new FileInputStream(args[0]);
                 FileOutputStream outputStream = new FileOutputStream(args[1]);) {
+            //ByteArrayOutputStream lzOutputStream = new ByteArrayOutputStream();
+            //new LempelZivAlgorithm(inputStream, outputStream).compress();
+            //ByteArrayInputStream huffmanInputStream = new ByteArrayInputStream(lzOutputStream.toByteArray());
             new HuffmanAlgorithm(inputStream, outputStream).compress();
         }
     }
@@ -390,8 +399,10 @@ class XCompress {
 
         try (FileInputStream inputStream = new FileInputStream(args[0]);
                 FileOutputStream outputStream = new FileOutputStream(args[1]);) {
-
+            ByteArrayOutputStream huffmanOutputStream = new ByteArrayOutputStream();
             new HuffmanAlgorithm(inputStream, outputStream).decompress();
+           // ByteArrayInputStream lzInputstream = new ByteArrayInputStream(huffmanOutputStream.toByteArray());
+            //new LempelZivAlgorithm(lzInputstream, outputStream).decompress();
         }
     }
 

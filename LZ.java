@@ -248,8 +248,6 @@ class SlidingWindow {
     private int offset = 0;
     private int divider = 0;
 
-    // TODO: implement char LUT for speed!
-
     public SlidingWindow(RingBuffer buffer, int windowSize, int lookaheadSize, int minMatchLength) {
         this.buffer = buffer;
         this.windowSize = windowSize;
@@ -415,49 +413,5 @@ class LempelZivAlgorithm {
         }
 
         outputStream.flush();
-    }
-}
-
-class XCompressLZ {
-    public static void compress(String[] args) throws IOException {
-        if (args.length == 0) {
-            System.out.println("No filepath was provided.");
-        }
-
-        try (FileInputStream inputStream = new FileInputStream(args[0]);
-                FileOutputStream outputStream = new FileOutputStream(args[1]);) {
-            new LempelZivAlgorithm(inputStream, outputStream).compress();
-        }
-    }
-
-    public static void decompress(String[] args) throws IOException {
-        if (args.length == 0) {
-            System.out.println("No filepath was provided.");
-        }
-
-        try (FileInputStream inputStream = new FileInputStream(args[0]);
-                FileOutputStream outputStream = new FileOutputStream(args[1]);) {
-
-            new LempelZivAlgorithm(inputStream, outputStream).decompress();
-        }
-    }
-
-    public static void printHelp() {
-        System.out.println("You must specify a flag (-c, -d or -h) and a file path.");
-    }
-
-    public static void main(String[] args) throws IOException {
-        String flag = args.length >= 1 ? args[0] : null;
-        switch (flag) {
-        case "-c":
-            compress(Arrays.copyOfRange(args, 1, args.length));
-            break;
-        case "-d":
-            decompress(Arrays.copyOfRange(args, 1, args.length));
-            break;
-        case "-h":
-            printHelp();
-            break;
-        }
     }
 }
