@@ -2,8 +2,6 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -21,20 +19,18 @@ class VariableWidthEncoding {
     private static final int MAX_BYTES = (int) Math.ceil((double) Integer.SIZE / BITS_PER_BYTE);
 
     public static void encode(int value, OutputStream outputStream) throws IOException {
-        new DataOutputStream(outputStream).writeInt(value);
-        /*while (value != 0) {
+        while (value != 0) {
             int bits = value & READ_BITS_MASK;
             value >>>= BITS_PER_BYTE;
             if (value != 0) {
                 bits |= CONTINUE_BIT;
             }
             outputStream.write(bits);
-        }*/
+        }
     }
 
     public static int decode(InputStream inputStream) throws IOException {
-        return new DataInputStream(inputStream).readInt();
-        /*int value = 0;
+        int value = 0;
         int shift = 0;
         int b;
         int bytesRead = 0;
@@ -48,7 +44,7 @@ class VariableWidthEncoding {
             }
         }
 
-        return value;*/
+        return value;
     }
 }
 
@@ -130,7 +126,7 @@ class HuffmanFrequencies {
 
     public void serialize(OutputStream outputStream) throws IOException {
         int nonZeroFrequencies = (int) Arrays.stream(frequencies).filter(x -> x != 0).count();
-        outputStream.write(nonZeroFrequencies);
+        VariableWidthEncoding.encode(nonZeroFrequencies, outputStream);
         for (int i = 0; i < frequencies.length; i++) {
             if (frequencies[i] != 0) {
                 outputStream.write(i);
@@ -141,7 +137,7 @@ class HuffmanFrequencies {
 
     public static HuffmanFrequencies deserialize(InputStream inputStream) throws IOException {
         HuffmanFrequencies instance = new HuffmanFrequencies();
-        int frequencyCount = inputStream.read() & 0xFF;
+        int frequencyCount =  VariableWidthEncoding.decode(inputStream);
         for (int i = 0; i < frequencyCount; i++) {
             byte c = (byte) inputStream.read();
             int frequency = VariableWidthEncoding.decode(inputStream);
@@ -169,7 +165,7 @@ class HuffmanTree {
     public int decode(byte c, byte[] out) {
         int bytes = 0;
         for (int i = Byte.SIZE - 1; i >= 0; i--) {
-            int bit = (c >>> i) & 1;
+            int bit = ((c & 0xFF) >>> i) & 1;
             decodeNode = decodeNode.getChild(bit);
             if (decodeNode.isLeaf()) {
                 out[bytes++] = decodeNode.getValue();
@@ -385,10 +381,10 @@ class XCompress {
 
         try (FileInputStream inputStream = new FileInputStream(args[0]);
                 FileOutputStream outputStream = new FileOutputStream(args[1]);) {
-            //ByteArrayOutputStream lzOutputStream = new ByteArrayOutputStream();
-            //new LempelZivAlgorithm(inputStream, outputStream).compress();
-            //ByteArrayInputStream huffmanInputStream = new ByteArrayInputStream(lzOutputStream.toByteArray());
-            new HuffmanAlgorithm(inputStream, outputStream).compress();
+            ByteArrayOutputStream lzOutputStream = new ByteArrayOutputStream();
+            new LempelZivAlgorithm(inputStream, lzOutputStream).compress();
+            ByteArrayInputStream huffmanInputStream = new ByteArrayInputStream(lzOutputStream.toByteArray());
+            new HuffmanAlgorithm(huffmanInputStream, outputStream).compress();
         }
     }
 
@@ -400,9 +396,9 @@ class XCompress {
         try (FileInputStream inputStream = new FileInputStream(args[0]);
                 FileOutputStream outputStream = new FileOutputStream(args[1]);) {
             ByteArrayOutputStream huffmanOutputStream = new ByteArrayOutputStream();
-            new HuffmanAlgorithm(inputStream, outputStream).decompress();
-           // ByteArrayInputStream lzInputstream = new ByteArrayInputStream(huffmanOutputStream.toByteArray());
-            //new LempelZivAlgorithm(lzInputstream, outputStream).decompress();
+            new HuffmanAlgorithm(inputStream, huffmanOutputStream).decompress();
+            ByteArrayInputStream lzInputstream = new ByteArrayInputStream(huffmanOutputStream.toByteArray());
+            new LempelZivAlgorithm(lzInputstream, outputStream).decompress();
         }
     }
 
