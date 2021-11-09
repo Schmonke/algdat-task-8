@@ -16,7 +16,7 @@ import java.util.LinkedList;
 
 class Match {
     public static final int SERIALIZED_BYTES = Short.BYTES * 2;
-
+    
     private final int distance;
     private final int length;
 
@@ -251,11 +251,52 @@ class SlidingWindow {
     private int offset = 0;
     private int divider = 0;
 
+    private final int[][] indexLut = new int[0xFFFF][];
+
     public SlidingWindow(RingBuffer buffer, int windowSize, int lookaheadSize, int minMatchLength) {
         this.buffer = buffer;
         this.windowSize = windowSize;
         this.lookaheadSize = lookaheadSize;
         this.minMatchLength = minMatchLength;
+        
+        for (int i = 0; i < indexLut.length; i++) {
+            indexLut[i] = new int[1];
+            indexLut[i][0] = 0;
+        }
+    }
+
+    private static int[] expandArray(int[] array) {
+        int[] newArray = new int[array.length*2];
+        for (int i = 0; i < array.length; i++) {
+            newArray[i] = array[i];
+        }
+        return newArray;
+    }
+
+    private void addEntry(int index, int value) {
+        int[] entries = indexLut[index];
+        if (entries[0] + 1 >= entries.length) {
+            int[] newEntries = expandArray(entries);
+            indexLut[index] = newEntries;
+            entries = newEntries;
+        }
+        entries[++entries[0]] = value;
+    }
+
+    private void removeEntry(int index, int value) {
+        int[] entries = indexLut[index];
+        boolean moveBack = false;
+        for (int i = 1; i <= entries[0]; i++) {
+            if (moveBack) {
+                entries[i - 1] = entries[i];
+            }
+            if (entries[i] == value) {
+                moveBack = true;
+            }
+        }
+        if (moveBack) {
+            entries[0]--;
+        }
     }
 
     public void setDivider(int index) {
@@ -269,11 +310,11 @@ class SlidingWindow {
 
         if (divider - oldDivider > 0) {
             for (int i = oldOffset; i < offset; i++) {
-                int entry = (buffer.get(i) & 0xFF) << 16 | (buffer.get(i + 1) & 0xFF) << 8 | (buffer.get(i + 2) & 0xFF);
+                int entry = (buffer.get(i) & 0xFF) << 8 | (buffer.get(i + 1) & 0xFF);
                 removeEntry(entry, i);
             }
             for (int i = oldDivider; i < divider; i++) {
-                int entry = (buffer.get(i) & 0xFF) << 16 | (buffer.get(i + 1) & 0xFF) << 8 | (buffer.get(i + 2) & 0xFF);
+                int entry = (buffer.get(i) & 0xFF) << 8 | (buffer.get(i + 1) & 0xFF);
                 addEntry(entry, i);
             }
         }
@@ -285,17 +326,13 @@ class SlidingWindow {
         if (lookaheadEnd < minMatchLength) {
             return null;
         }
-        int twoBytes = (buffer.get(this.divider) & 0xFF) << 16 | (buffer.get(this.divider + 1) & 0xFF) << 8
-                | (buffer.get(this.divider + 2) & 0xFF);
+        int twoBytes = (buffer.get(this.divider) & 0xFF) << 8 | (buffer.get(this.divider + 1) & 0xFF);
 
-        int[] matches = charToIndexLut[twoBytes];
-        if (matches == null) {
-            return null;
-        }
+        int[] matches = indexLut[twoBytes];
 
         int matchIndex = -1;
         int matchLength = 0;
-        for (int j = 0; j < matches.length; j++) {
+        for (int j = 1; j <= matches[0]; j++) {
             int windowIndex = matches[j];
             int i;
             for (i = 1; i < lookaheadEnd && i + windowIndex < this.divider; i++) {
