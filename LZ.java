@@ -1,4 +1,5 @@
 import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -108,7 +109,8 @@ class RingBuffer {
     public void addAll(byte[] array, int offset, int length) {
         int count = length - offset;
         if (size + count > buffer.length) {
-            throw new IllegalStateException("not enough space in buffer");
+            throw new IllegalArgumentException(
+                    "not enough space in buffer " + (buffer.length - size) + " B left, adding " + count);
         }
         for (int i = offset; i < length; i++) {
             pushByte(array[i]);
@@ -177,6 +179,7 @@ class OutputWriter {
         }
 
         allocateNewChunkIfFull();
+        entryCount = 0;
         blockStartIndex = entryIndex++;
         blockStartArray = outputChunk;
     }
@@ -246,6 +249,8 @@ class SlidingWindow {
     private int offset = 0;
     private int divider = 0;
 
+    // TODO: implement char LUT for speed!
+
     public SlidingWindow(RingBuffer buffer, int windowSize, int lookaheadSize, int minMatchLength) {
         this.buffer = buffer;
         this.windowSize = windowSize;
@@ -311,7 +316,7 @@ class LempelZivAlgorithm {
 
     public LempelZivAlgorithm(InputStream inputStream, OutputStream outputStream) {
         this.inputStream = new BufferedInputStream(inputStream);
-        this.outputStream = outputStream;
+        this.outputStream = new BufferedOutputStream(outputStream);
     }
 
     private int readChunkIntoRingBuffer(RingBuffer buffer) throws IOException {
@@ -362,7 +367,6 @@ class LempelZivAlgorithm {
 
             byte[] output = outputWriter.getFullChunk();
             if (output != null) {
-                System.out.println("WRITING CHUNK");
                 outputStream.write(output);
             }
         }
@@ -371,6 +375,52 @@ class LempelZivAlgorithm {
         if (finalOutput != null) {
             outputStream.write(finalOutput.array, 0, finalOutput.size);
         }
+
+        outputStream.flush();
+    }
+
+    public void decompress() throws IOException {
+        RingBuffer window = new RingBuffer(WINDOW_SIZE);
+        byte[] writeBuffer = new byte[WINDOW_SIZE];
+
+        boolean moreData = true;
+        while (moreData) {
+            int firstByte = inputStream.read();
+            if (firstByte == -1) {
+                moreData = false;
+                break;
+            }
+            byte entries = (byte) firstByte;
+            boolean isCompressed = entries < 0 ? true : false;
+            byte[] entry = new byte[isCompressed ? Match.SERIALIZED_BYTES : Byte.BYTES];
+            entries = (byte) Math.abs(entries);
+
+            for (int i = 0; i < entries; i++) {
+                int writeLength = 0;
+                int bytesRead = inputStream.read(entry);
+                if (bytesRead != entry.length) {
+                    throw new IOException("couldnt read entry");
+                }
+                if (isCompressed) {
+                    Match match = Match.deserialize(entry);
+                    int base = window.getSize() - match.getDistance();
+                    for (int j = 0; j < match.getLength(); j++) {
+                        writeBuffer[j] = window.get(base + j);
+                    }
+                    writeLength = match.getLength();
+                } else {
+                    writeBuffer[0] = entry[0];
+                    writeLength = 1;
+                }
+                if (window.getSize() + writeLength >= WINDOW_SIZE) {
+                    window.drop((window.getSize() + writeLength) - WINDOW_SIZE);
+                }
+                outputStream.write(writeBuffer, 0, writeLength);
+                window.addAll(writeBuffer, 0, writeLength);
+            }
+        }
+
+        outputStream.flush();
     }
 }
 
@@ -394,7 +444,7 @@ class XCompressLZ {
         try (FileInputStream inputStream = new FileInputStream(args[0]);
                 FileOutputStream outputStream = new FileOutputStream(args[1]);) {
 
-            // new LempelZivAlgorithm(inputStream, outputStream).decompress();
+            new LempelZivAlgorithm(inputStream, outputStream).decompress();
         }
     }
 
