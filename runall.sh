@@ -1,5 +1,5 @@
 echo "Compiling..."
-javac LZ.java XCompress.java
+javac XCompress.java
 
 echo "----------diverse.lyx----------"
 java XCompress -c files/diverse.lyx files/diverse.lyx.lzh
