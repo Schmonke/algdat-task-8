@@ -152,23 +152,6 @@ class OutputWriter {
         entryCount = 0;
     }
 
-    // First byte: Amount of entries in block, negative = uncompressed, positive =
-    // compressed
-    // Following bytes: Entries
-    // MUST be possible to write blocks across output blocks
-
-    // * We must write entries of the same type UNTIL a type switch occurs
-    // (uncompressed -> compressed or other way around)
-    // * When a type switch occurs, we must write the amount of entries into the
-    // first byte
-    // * When getFinalBlock is called, first byte must also be written, and the
-    // output buffer must be returned.
-    // * When the entry count reaches 127 (or -128), the first byte must also be
-    // written.
-    //
-    // NOTE: The first byte can be in the previous buffer, and it must NOT be
-    // returned until the first byte is written into it.
-
     private void finalizeEntryBlock() {
         if (entryCount == 0) {
             return;
@@ -782,8 +765,9 @@ class HuffmanAlgorithm {
 
 class XCompress {
     public static void compress(String[] args) throws IOException {
-        if (args.length == 0) {
-            System.out.println("No filepath was provided.");
+        if (args.length < 2) {
+            System.out.println("two file paths must be provided.");
+            return;
         }
 
         try (FileInputStream inputStream = new FileInputStream(args[0]);
@@ -796,8 +780,9 @@ class XCompress {
     }
 
     public static void decompress(String[] args) throws IOException {
-        if (args.length == 0) {
-            System.out.println("No filepath was provided.");
+        if (args.length < 2) {
+            System.out.println("two file paths must be provided.");
+            return;
         }
 
         try (FileInputStream inputStream = new FileInputStream(args[0]);
@@ -810,11 +795,20 @@ class XCompress {
     }
 
     public static void printHelp() {
-        System.out.println("You must specify a flag (-c, -d or -h) and a file path.");
+        System.out.println(
+            "You must specify a flag (-c, -d or -h) and one file path for source and one for target file.\n" +
+            "Flags:\n" +
+            " -c: compress file\n" +
+            " -d: decompress file\n" +
+            " -h: show this help\n" +
+            "\n" +
+            "E.g. java XCompress -c uncompressed_file compressed_file\n" +
+            "     java XCompress -d compressed_file decompressed_file"
+        );
     }
 
     public static void main(String[] args) throws IOException {
-        String flag = args.length >= 1 ? args[0] : null;
+        String flag = args.length >= 1 ? args[0] : "-h";
         switch (flag) {
         case "-c":
             compress(Arrays.copyOfRange(args, 1, args.length));
