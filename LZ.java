@@ -11,6 +11,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedList;
 
 class Match {
     public static final int SERIALIZED_BYTES = Short.BYTES * 2;
@@ -249,8 +251,6 @@ class SlidingWindow {
     private int offset = 0;
     private int divider = 0;
 
-    // TODO: implement char LUT for speed!
-
     public SlidingWindow(RingBuffer buffer, int windowSize, int lookaheadSize, int minMatchLength) {
         this.buffer = buffer;
         this.windowSize = windowSize;
@@ -259,33 +259,59 @@ class SlidingWindow {
     }
 
     public void setDivider(int index) {
+        int oldDivider = divider;
+        int oldOffset = offset;
         divider = index;
         offset = divider - windowSize;
         if (offset < 0) {
             offset = 0;
         }
+
+        if (divider - oldDivider > 0) {
+            for (int i = oldOffset; i < offset; i++) {
+                int entry = (buffer.get(i) & 0xFF) << 16 | (buffer.get(i + 1) & 0xFF) << 8 | (buffer.get(i + 2) & 0xFF);
+                removeEntry(entry, i);
+            }
+            for (int i = oldDivider; i < divider; i++) {
+                int entry = (buffer.get(i) & 0xFF) << 16 | (buffer.get(i + 1) & 0xFF) << 8 | (buffer.get(i + 2) & 0xFF);
+                addEntry(entry, i);
+            }
+        }
+
     }
 
     public Match findMatch() {
         int lookaheadEnd = Math.min(lookaheadSize, buffer.getSize() - this.divider);
+        if (lookaheadEnd < minMatchLength) {
+            return null;
+        }
+        int twoBytes = (buffer.get(this.divider) & 0xFF) << 16 | (buffer.get(this.divider + 1) & 0xFF) << 8
+                | (buffer.get(this.divider + 2) & 0xFF);
+
+        int[] matches = charToIndexLut[twoBytes];
+        if (matches == null) {
+            return null;
+        }
 
         int matchIndex = -1;
         int matchLength = 0;
-        for (int i = this.offset; i < this.divider; i++) {
-            int j;
-            int jMax = Math.min(lookaheadEnd, this.divider - i);
-            for (j = 0; j < jMax; j++) {
-                if (buffer.get(i + j) != buffer.get(this.divider + j)) {
+        for (int j = 0; j < matches.length; j++) {
+            int windowIndex = matches[j];
+            int i;
+            for (i = 1; i < lookaheadEnd && i + windowIndex < this.divider; i++) {
+                if (buffer.get(divider + i) != buffer.get(windowIndex + i)) {
                     break;
                 }
             }
-            if (j > matchLength) {
-                matchIndex = i;
-                matchLength = j;
+            if (i > matchLength) {
+                matchIndex = windowIndex;
+                matchLength = i;
             }
         }
 
-        if (matchLength > minMatchLength) {
+        if (matchLength > minMatchLength)
+
+        {
             return new Match(this.divider - matchIndex, matchLength);
         } else {
             return null;
@@ -304,7 +330,7 @@ class SlidingWindow {
 class LempelZivAlgorithm {
     private static final int MIN_MATCH_LENGTH = Match.SERIALIZED_BYTES + 1; // 5bytes
 
-    private static final int LOOKAHEAD_SIZE = 16384;
+    private static final int LOOKAHEAD_SIZE = 256;
     private static final int WINDOW_SIZE = 32768;
     private static final int READ_CHUNK_SIZE = 131072; // 128 KiB
     private static final int OUTPUT_CHUNK_SIZE = 16777220; // 16 MiB
@@ -319,10 +345,14 @@ class LempelZivAlgorithm {
         this.outputStream = new BufferedOutputStream(outputStream);
     }
 
+    private int br;
+
     private int readChunkIntoRingBuffer(RingBuffer buffer) throws IOException {
         byte[] array = new byte[RING_BUFFER_CAPACITY - buffer.getSize()];
         int bytesRead = inputStream.read(array);
         if (bytesRead != -1) {
+            br += bytesRead;
+            System.out.printf("%.2f MiB%n", br / (1024.0 * 1024.0));
             buffer.addAll(array, 0, bytesRead);
             return bytesRead;
         }
@@ -336,7 +366,6 @@ class LempelZivAlgorithm {
 
         readChunkIntoRingBuffer(buffer);
 
-        int iter = 0;
         boolean moreDataInStream = true;
         // fill read-buffer with first arrays
         for (int lookaheadIndex = 0; lookaheadIndex < buffer.getSize();) {
@@ -349,10 +378,6 @@ class LempelZivAlgorithm {
                 lookaheadIndex -= moveBack;
             }
             window.setDivider(lookaheadIndex);
-
-            if (++iter % 10_000 == 0) {
-                System.out.println(iter);
-            }
 
             Match match = window.findMatch();
             if (match == null) {
